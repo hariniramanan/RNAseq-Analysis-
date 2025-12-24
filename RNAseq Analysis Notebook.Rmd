@@ -1,0 +1,294 @@
+---
+title: "DOP : RNAseq Pipeline and Analysis"
+output: html_notebook
+---
+
+```{r}
+library(tximport)
+library(readr)
+library(DESeq2)
+library(GenomicFeatures)
+library(AnnotationDbi)
+```
+
+Upload RNA sample vs Time Condition
+```{r}
+setwd("/Users/hariniramanan/Desktop/DOP/RNAseq dataset")
+samples <- read.csv("samples.csv", header=TRUE) 
+```
+
+Upload Quant files from Salmon Pseudo alignment
+```{r}
+files <- file.path("quants", samples$sample, "quant.sf")
+names(files) <- samples$sample
+
+```
+
+Build a TxDb object from GTF -- getting transcript data from public
+
+```{r}
+txdb <- makeTxDbFromGFF("Homo_sapiens.GRCh38.110.gtf.gz")
+```
+
+
+Extract transcript-to-gene mapping
+```{r}
+k <- keys(txdb, keytype = "TXNAME")
+tx2gene <- select(txdb, keys = k, keytype = "TXNAME", columns = "GENEID")
+write.csv(tx2gene, file="tx2gene.csv", row.names=FALSE)
+tx2gene <- read.csv("tx2gene.csv")
+```
+Now txi$counts will be gene-wise counts.
+```{r}
+txdb <- GenomicFeatures::makeTxDbFromGFF("Homo_sapiens.GRCh38.110.gtf.gz")
+library(txdbmaker)
+txdb <- txdbmaker::makeTxDbFromGFF("Homo_sapiens.GRCh38.110.gtf.gz")
+```
+Extract mapping with annotation file - create table with transcript and to its according gene
+```{r}
+k <- keys(txdb, keytype = "TXNAME")
+tx2gene <- AnnotationDbi::select(txdb,
+                                 keys = k,
+                                 keytype = "TXNAME",
+                                 columns = "GENEID")
+```
+
+Clean transcript IDs (remove version numbers like .1, .2)
+```{r}
+tx2gene$TXNAME <- sub("\\..*", "", tx2gene$TXNAME)
+head(tx2gene)
+write.csv(tx2gene, "tx2gene.csv", row.names = FALSE)
+txi <- tximport(files, type = "salmon", tx2gene = tx2gene, ignoreTxVersion = TRUE)
+```
+
+
+```{r}
+samples <- data.frame(
+  SampleID = c("RMC192","RMC196","RMC200",
+               "RMC193","RMC197","RMC201",
+               "RMC194","RMC198","RMC202",
+               "RMC195","RMC199","RMC203"),
+  Timepoint = c("3hr","3hr","3hr",
+                "3day","3day","3day",
+                "6day","6day","6day",
+                "10day","10day","10day"),
+  stringsAsFactors = FALSE
+)
+
+dds <- DESeqDataSetFromTximport(
+  txi,
+  colData = samples,
+  design = ~ Timepoint
+)
+
+dds <- DESeq(dds)
+
+
+```
+
+Gene Annotation
+```{r}
+library(ggplot2)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(AnnotationDbi)
+library(UniProt.ws)
+```
+
+
+
+```{r}
+
+res_3hr_vs_3day <- results(dds, contrast = c("Timepoint", "3hr", "3day"))
+head(res_3hr_vs_3day)
+res_3day_vs_6day <- results(dds, contrast = c("Timepoint", "3day", "6day"))
+res_6day_vs_10day <- results(dds, contrast = c("Timepoint", "6day", "10day"))
+
+# Define the contrasts you want to check
+contrasts <- list(
+  c("Timepoint", "3hr", "3day"),
+  c("Timepoint", "3day", "6day"),
+  c("Timepoint", "6day", "10day"),
+  c("Timepoint", "3hr", "10day"),
+  c("Timepoint", "3hr", "6day"),
+  c("Timepoint", "3day", "10day")
+)
+
+```
+
+
+
+```{r}
+###Data Visualization 
+library(ggplot2)  # nice package for volcano plots
+
+# Define the contrasts
+contrasts <- list(
+  c("Timepoint", "3hr", "3day"),
+  c("Timepoint", "3day", "6day"),
+  c("Timepoint", "6day", "10day"),
+  c("Timepoint", "3hr", "10day"),
+  c("Timepoint", "3hr", "6day"),
+  c("Timepoint", "3day", "10day")
+)
+
+library(ggplot2)
+
+```
+
+
+
+```{r}
+  # 3hr vs 3day results
+  res <- results(dds, contrast = c("Timepoint", "3hr", "3day"))
+  res_df <- as.data.frame(res)
+  
+  # Add a column for significance (padj < 0.05 & |log2FC| > 1)
+  res_df$Significant <- ifelse(res_df$padj < 0.05 & abs(res_df$log2FoldChange) > 1, "Yes", "No")
+  
+  # Volcano plot
+  ggplot(res_df, aes(x = log2FoldChange, y = -log10(padj), color = Significant)) +
+    geom_point(alpha = 0.6, size = 1.8) +
+    scale_color_manual(values = c("No" = "grey", "Yes" = "red")) +
+    theme_minimal() +
+    labs(title = "Volcano Plot: 3hr vs 3day",
+         x = "Log2 Fold Change",
+         y = "-log10 adjusted p-value")
+  
+```
+
+
+
+```{r}
+  ## --- MA Plot ---
+# MA plot
+comp_name <- "3hr vs 3day"
+plotMA(res, main = paste("MA Plot:", comp_name), ylim = c(-5, 5))
+
+# PCA
+vsd <- vst(dds)
+plotPCA(vsd, intgroup = "Timepoint")
+
+```
+
+
+
+```{r}
+library(pheatmap)
+sampleDists <- dist(t(assay(vsd)))
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- colnames(vsd)
+colnames(sampleDistMatrix) <- colnames(vsd)
+pheatmap(sampleDistMatrix, clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         main="Sample Distance Heatmap")
+```
+
+```{r}
+
+topGenes <- head(order(res_3hr_vs_3day$padj), 50)
+mat <- assay(vsd)[topGenes, ]
+pheatmap(mat, scale="row", show_rownames=FALSE,
+         annotation_col = as.data.frame(colData(dds)["Timepoint"]))
+
+```
+```{r}
+# Gene Annotation
+library(org.Hs.eg.db)
+# Extract Ensembl IDs from results
+ens_ids <- rownames(res_3hr_vs_3day)
+
+# Map to SYMBOLS and ENTREZ IDs
+gene_map <- mapIds(org.Hs.eg.db,
+                   keys = ens_ids,
+                   column = c("SYMBOL"),
+                   keytype = "ENSEMBL",
+                   multiVals = "first")
+
+##GO ANALYSIS
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+# Example: 3hr vs 3day results
+res <- results(dds, contrast = c("Timepoint", "3hr", "3day"))
+res_df <- as.data.frame(res)
+
+# Filter significant DEGs
+sig_res <- subset(res_df, padj < 0.05)
+
+# Map Ensembl → Entrez
+entrez_ids <- mapIds(org.Hs.eg.db,
+                     keys = rownames(sig_res),
+                     column = "ENTREZID",
+                     keytype = "ENSEMBL",
+                     multiVals = "first")
+
+# Remove NAs
+entrez_ids <- na.omit(entrez_ids)
+
+
+ego <- enrichGO(gene          = entrez_ids,
+                OrgDb         = org.Hs.eg.db,
+                keyType       = "ENTREZID",
+                ont           = "BP",      # Biological Process
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05)
+
+# View top results
+head(ego)
+
+```
+
+```{r}
+# Plot
+barplot(ego, showCategory=20, title="GO Biological Process")
+dotplot(ego, showCategory=20, title="GO Enrichment")
+
+#KEGG
+ekegg <- enrichKEGG(gene         = entrez_ids,
+                    organism     = "hsa",   # hsa = Homo sapiens
+                    pvalueCutoff = 0.05)
+```
+
+
+```{r}
+
+barplot(ego, showCategory=20, title="GO Biological Process")
+
+```
+
+```{r}
+##Venn Diagram
+# Get DEGs for each timepoint vs 3hr
+DEG_3day <- subset(results(dds, contrast=c("Timepoint","3day","3hr")), padj < 0.05)
+DEG_6day <- subset(results(dds, contrast=c("Timepoint","6day","3hr")), padj < 0.05)
+DEG_10day <- subset(results(dds, contrast=c("Timepoint","10day","3hr")), padj < 0.05)
+
+# Extract gene IDs
+genes_3hr  <- rownames(DEG_3day)  # DEGs appear here when 3day != 3hr
+genes_3day <- rownames(DEG_3day)
+genes_6day <- rownames(DEG_6day)
+genes_10day <- rownames(DEG_10day)
+
+library(VennDiagram)
+
+venn.plot <- venn.diagram(
+  x = list(
+    "3hr"  = genes_3hr,
+    "3day" = genes_3day,
+    "6day" = genes_6day,
+    "10day"= genes_10day
+  ),
+  filename = NULL,
+  fill = c("red", "blue", "green", "purple"),
+  alpha = 0.5,
+  cex = 1.5,
+  cat.cex = 1.5,
+  main = "Overlap of DEGs across Timepoints"
+)
+
+grid::grid.draw(venn.plot)
+
+```
+
